@@ -1,0 +1,116 @@
+name: 'Build docker image'
+description: 'Build imove docker image'
+inputs:
+  acr-name: 
+    description: "docker registry name"
+    required: false
+    default: "imoveregistry.azurecr.io"
+  app-name: 
+    description: "container image name, without prefix. Ex chargebee"
+    required: true
+    default: ""
+  registry-username: 
+    description: "container registry username"
+    required: true
+    default: ""
+  registry-password: 
+    description: "container registry password"
+    required: true
+    default: ""        
+  cluster-name: 
+    description: "k8s cluster name"
+    required: true
+    default: "imove-test-cluster"
+  resource-group:
+    description: "Azure resource group name"
+    required: true 
+    default: "imove-test-resources" 
+  img-pull-secret:
+    description: "Image pull secret"
+    required: false
+    default: imoveregistry
+  namespace:
+    description: "k8s namespace to deploy to on given cluster"
+    required: true
+    default: "imove-test"  
+  kustomization-path: 
+    description: "Path for kustomization"
+    required: true 
+    default: "./k8s/overlays/test"
+  azure-credentials:
+    description: "Credentials for azure aks cluster"
+    required: true
+    default: ""
+  migration-job-name: 
+    description: "Name of migration job"
+    required: false
+    default: "nothing"    
+outputs:
+  sha_short:
+    description: "Short sha"
+    value: ${{steps.vars.outputs.sha_short}}
+runs:
+  using: "composite"
+  steps:
+    - uses: actions/checkout@v2
+      with:
+        fetch-depth: 2
+    - name: Set outputs
+      id: vars
+      run: echo "::set-output name=sha_short::$(git rev-parse --short HEAD)"  
+      shell: bash      
+    - name: Check outputs        
+      run: echo ${{ steps.vars.outputs.sha_short }}        
+      shell: bash         
+    - uses: azure/k8s-bake@v1
+      id: bake
+      env:
+        DOCKER_TAG: ${{ steps.vars.outputs.sha_short }}
+      with:
+        renderEngine: 'kustomize'
+        kustomizationPath: ${{ inputs.kustomization-path }}
+        kubectl-version: 'latest'  
+        silent: 'false'              
+    - name: Login to k8s cluster
+      uses: azure/aks-set-context@v1
+      with:
+        creds: ${{ inputs.azure-credentials}}
+        cluster-name: ${{ inputs.cluster-name }}
+        resource-group: ${{ inputs.resource-group }}     
+    - name: Cleanup jobs before run
+      run: |
+        echo "Image: ${{inputs.acr-name}}/${{inputs.app-name}}:${{ steps.vars.outputs.sha_short }}" 
+        kubectl delete job -n ${{inputs.namespace}} ${{inputs.migration-job-name}} --ignore-not-found=true
+      shell: bash     
+    - uses: azure/k8s-create-secret@v1
+      with:
+        container-registry-url: ${{ inputs.acr-name }}
+        container-registry-username: ${{ inputs.registry-username }}
+        container-registry-password: ${{ inputs.registry-password }}
+        secret-name: ${{ inputs.img-pull-secret }}
+        namespace: ${{ inputs.namespace }}
+        arguments: --force false
+  # Deploy app to AKS
+    # Images is broken in k8s-deploy using DOCKER_TAG                            
+    - uses: azure/k8s-deploy@v1
+      with:
+        manifests: |
+          ${{ steps.bake.outputs.manifestsBundle }}
+        images: |
+          ${{inputs.acr-name}}/${{inputs.app-name}}:${{ steps.vars.outputs.sha_short }}   
+        imagepullsecrets: |
+          ${{inputs.img-pull-secret}}
+        namespace: ${{ inputs.namespace }}
+
+            
+    # - name: Run lint and test
+    #   run: |
+    #     docker run --rm ${{inputs.acr-name}}/${{inputs.repo-name}}:$GITHUB_SHA npm run predeploy     
+    #   shell: bash           
+    # - run: echo Hello ${{ inputs.repo-name }}.
+    #   shell: bash
+    # - id: random-number-generator
+    #   run: echo "::set-output name=random-id::$(echo $RANDOM)"
+    #   shell: bash
+    # - run: ${{ github.action_path }}/goodbye.sh
+    #   shell: bash
